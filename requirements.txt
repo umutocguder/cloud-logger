@@ -1,0 +1,11 @@
+# Google Cloud Observability (Optional but recommended for full GCP streaming)
+google-cloud-logging>=3.10.0
+google-cloud-error-reporting>=1.10.0
+google-auth>=2.28.0
+
+# Terminal UI & Formatting
+rich>=13.7.0
+
+# HTTP & Environment
+requests>=2.31.0
+python-dotenv>=1.0.1
