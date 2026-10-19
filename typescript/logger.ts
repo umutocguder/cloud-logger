@@ -1,179 +1,173 @@
 /**
- * TypeScript / Node.js Structured Logger with Local Data Custody and Google Cloud Observability.
+ * Created by 11Hopem
+ * Copyright (c) 2026 11hopem. All rights reserved.
+ *
+ * Tarayıcıdan Firebase'e log yazan istemci.
+ *
+ * Neden Firestore REST: Cloud Logging ve Error Reporting uçları OAuth2 ister;
+ * tarayıcıda servis hesabı tutulamayacağı için o uçlara yapılan istekler
+ * sessizce başarısız olur. Firestore REST, public web apiKey ile yazmaya
+ * izin verir ve kuralları yalnızca yazmaya açıktır.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+export type LogSeviyesi = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
 
-export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
-
-export interface LogRecord {
-  timestamp: string;
-  level: LogLevel;
-  project_name: string;
-  module?: string;
-  function?: string;
-  message: string;
-  execution_time_ms?: number;
-  context?: Record<string, any>;
-  traceback?: string;
+export interface LoggerAyarlari {
+  uygulamaAdi: string
+  surum?: string
+  firebaseProjeId: string
+  firebaseApiKey: string
+  ortam?: string
+  /** INFO/DEBUG kayıtlarının gönderilme oranı (0-1). Ücretsiz kota için. */
+  bilgiOrneklemeOrani?: number
+  /** Oturum başına gönderilecek azami kayıt. Döngüye giren hata kotayı yakmasın. */
+  oturumBasinaAzami?: number
 }
 
-export interface LoggerOptions {
-  projectName: string;
-  logDir?: string;
-  logLevel?: LogLevel;
-  gcpProjectId?: string;
-  enableConsole?: boolean;
-}
+const AGIR_SEVIYELER: LogSeviyesi[] = ['ERROR', 'CRITICAL']
 
-const LEVEL_SEVERITY: Record<LogLevel, number> = {
-  DEBUG: 10,
-  INFO: 20,
-  WARNING: 30,
-  ERROR: 40,
-  CRITICAL: 50,
-};
+const GIZLENECEK_ANAHTARLAR = [
+  'telefon', 'phone', 'gsm', 'eposta', 'email', 'mail', 'tc', 'tckn', 'kimlik',
+  'veli', 'parola', 'password', 'sifre', 'token', 'secret', 'apikey', 'adres', 'address'
+]
 
-export class CloudLoggerTS {
-  private projectName: string;
-  private logDir: string;
-  private minLevel: number;
-  private appLogPath: string;
-  private errorLogPath: string;
-  private enableConsole: boolean;
-  private gcpProjectId?: string;
+const DESENLER: [RegExp, string][] = [
+  [/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, '<eposta>'],
+  [/\b0?5\d{9}\b/g, '<telefon>'],
+  [/\b\d{11}\b/g, '<kimlik>'],
+  [/\b(?:\d[ -]?){13,19}\b/g, '<kart>']
+]
 
-  constructor(options: LoggerOptions) {
-    this.projectName = options.projectName;
-    this.logDir = options.logDir || path.join(process.cwd(), 'logs');
-    this.minLevel = LEVEL_SEVERITY[options.logLevel || 'INFO'] || 20;
-    this.enableConsole = options.enableConsole ?? true;
-    this.gcpProjectId = options.gcpProjectId || process.env.GCP_PROJECT_ID;
-
-    // Ensure log directory exists
-    if (!fs.existsSync(this.logDir)) {
-      fs.mkdirSync(this.logDir, { recursive: true });
+export function kisiselVeriyiTemizle(deger: unknown, anahtar = ''): unknown {
+  if (GIZLENECEK_ANAHTARLAR.some((a) => anahtar.toLowerCase().includes(a))) return '<gizlendi>'
+  if (typeof deger === 'string') {
+    let temiz = deger
+    for (const [kalip, yerine] of DESENLER) temiz = temiz.replace(kalip, yerine)
+    return temiz.length > 2000 ? temiz.slice(0, 2000) + '…' : temiz
+  }
+  if (Array.isArray(deger)) return deger.slice(0, 20).map((d) => kisiselVeriyiTemizle(d))
+  if (deger && typeof deger === 'object') {
+    const cikti: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(deger as Record<string, unknown>).slice(0, 30)) {
+      cikti[k] = kisiselVeriyiTemizle(v, k)
     }
+    return cikti
+  }
+  return deger
+}
 
-    this.appLogPath = path.join(this.logDir, 'app.jsonl');
-    this.errorLogPath = path.join(this.logDir, 'error.jsonl');
+function firestoreDegeri(deger: unknown): Record<string, unknown> {
+  if (deger === null || deger === undefined) return { nullValue: null }
+  if (typeof deger === 'number') return { doubleValue: deger }
+  if (typeof deger === 'boolean') return { booleanValue: deger }
+  if (typeof deger === 'object') return { stringValue: JSON.stringify(deger).slice(0, 4000) }
+  return { stringValue: String(deger).slice(0, 4000) }
+}
+
+export class BulutLogger {
+  private ayarlar: Required<LoggerAyarlari>
+  private gonderilen = 0
+
+  constructor(ayarlar: LoggerAyarlari) {
+    this.ayarlar = {
+      surum: '0.0.0',
+      ortam: 'production',
+      bilgiOrneklemeOrani: 0.05,
+      oturumBasinaAzami: 50,
+      ...ayarlar
+    }
   }
 
-  private shouldLog(level: LogLevel): boolean {
-    return (LEVEL_SEVERITY[level] || 20) >= this.minLevel;
+  private gonderilmeli(seviye: LogSeviyesi): boolean {
+    if (this.gonderilen >= this.ayarlar.oturumBasinaAzami) return false
+    if (AGIR_SEVIYELER.includes(seviye) || seviye === 'WARNING') return true
+    return Math.random() < this.ayarlar.bilgiOrneklemeOrani
   }
 
-  private writeLocal(record: LogRecord): void {
+  private koleksiyon(seviye: LogSeviyesi): string {
+    return AGIR_SEVIYELER.includes(seviye) ? 'crash_logs' : 'app_logs'
+  }
+
+  /**
+   * Kaydı gönderir. Dönen söz hiçbir zaman reddetmez; uygulama tarafında
+   * beklenmesi gerekmez (fire-and-forget), testlerde beklenebilsin diye döner.
+   */
+  kayit(seviye: LogSeviyesi, mesaj: string, baglam: Record<string, unknown> = {}): Promise<boolean> {
     try {
-      const line = JSON.stringify(record) + '\n';
-      fs.appendFileSync(this.appLogPath, line, 'utf-8');
+      if (!this.gonderilmeli(seviye)) return Promise.resolve(false)
+      this.gonderilen++
 
-      if (record.level === 'ERROR' || record.level === 'CRITICAL') {
-        fs.appendFileSync(this.errorLogPath, line, 'utf-8');
+      const alanlar: Record<string, unknown> = {
+        appName: firestoreDegeri(this.ayarlar.uygulamaAdi),
+        appVersion: firestoreDegeri(this.ayarlar.surum),
+        projectId: firestoreDegeri(this.ayarlar.firebaseProjeId),
+        env: firestoreDegeri(this.ayarlar.ortam),
+        level: firestoreDegeri(seviye),
+        event: firestoreDegeri(AGIR_SEVIYELER.includes(seviye) ? 'UNHANDLED_ERROR' : 'APP_EVENT'),
+        message: firestoreDegeri(kisiselVeriyiTemizle(mesaj)),
+        context: firestoreDegeri(kisiselVeriyiTemizle(baglam)),
+        timestamp: firestoreDegeri(new Date().toISOString())
       }
-    } catch {
-      // Zero-crash policy
-    }
-  }
 
-  private async dispatchGCP(record: LogRecord): Promise<void> {
-    if (!this.gcpProjectId) return;
-    try {
-      // Standard Google Cloud Logging REST API dispatch (non-blocking)
-      const token = process.env.GOOGLE_AUTH_TOKEN;
-      if (!token) return;
+      if (typeof window !== 'undefined') {
+        alanlar.url = firestoreDegeri(kisiselVeriyiTemizle(window.location?.href ?? ''))
+        alanlar.userAgent = firestoreDegeri(navigator?.userAgent ?? '')
+      }
 
-      const url = `https://logging.googleapis.com/v2/entries:write`;
-      await fetch(url, {
+      const adres =
+        `https://firestore.googleapis.com/v1/projects/${this.ayarlar.firebaseProjeId}` +
+        `/databases/(default)/documents/${this.koleksiyon(seviye)}?key=${this.ayarlar.firebaseApiKey}`
+
+      return fetch(adres, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          logName: `projects/${this.gcpProjectId}/logs/${this.projectName}`,
-          entries: [
-            {
-              severity: record.level,
-              jsonPayload: record,
-              labels: { project_name: this.projectName },
-            },
-          ],
-        }),
-      });
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: alanlar }),
+        keepalive: true
+      })
+        .then((y) => y.ok)
+        .catch(() => false)
     } catch {
-      // Zero-crash policy
+      /* loglama hiçbir koşulda uygulamayı düşürmez */
+      return Promise.resolve(false)
     }
   }
 
-  private log(
-    level: LogLevel,
-    message: string,
-    context?: Record<string, any>,
-    error?: Error | unknown,
-    executionTimeMs?: number
-  ): void {
-    if (!this.shouldLog(level)) return;
-
-    const now = new Date().toISOString();
-    let traceback: string | undefined;
-
-    if (error instanceof Error) {
-      traceback = error.stack;
-    } else if (error) {
-      traceback = String(error);
-    }
-
-    const record: LogRecord = {
-      timestamp: now,
-      level,
-      project_name: this.projectName,
-      message,
-      execution_time_ms: executionTimeMs,
-      context,
-      traceback,
-    };
-
-    // 1. Console
-    if (this.enableConsole) {
-      const timeStr = now.slice(11, 19);
-      const prefix = `[${timeStr}] [${level}] [${this.projectName}]`;
-      if (level === 'ERROR' || level === 'CRITICAL') {
-        console.error(`${prefix} ${message}`, context || '', traceback || '');
-      } else {
-        console.log(`${prefix} ${message}`, context || '');
-      }
-    }
-
-    // 2. Local Dual-Write (100% Custody)
-    this.writeLocal(record);
-
-    // 3. GCP Dispatch (Fire-and-forget)
-    this.dispatchGCP(record).catch(() => {});
+  debug(m: string, b?: Record<string, unknown>) { return this.kayit('DEBUG', m, b) }
+  info(m: string, b?: Record<string, unknown>) { return this.kayit('INFO', m, b) }
+  uyari(m: string, b?: Record<string, unknown>) { return this.kayit('WARNING', m, b) }
+  hata(m: string | Error, b?: Record<string, unknown>): Promise<boolean> {
+    const mesaj = m instanceof Error ? m.message : m
+    const ek = m instanceof Error ? { ...b, stack: (m.stack ?? '').slice(0, 3000) } : b
+    return this.kayit('ERROR', mesaj, ek)
+  }
+  cokme(m: string | Error, b?: Record<string, unknown>): Promise<boolean> {
+    const mesaj = m instanceof Error ? m.message : m
+    const ek = m instanceof Error ? { ...b, stack: (m.stack ?? '').slice(0, 3000) } : b
+    return this.kayit('CRITICAL', mesaj, ek)
   }
 
-  public debug(message: string, context?: Record<string, any>): void {
-    this.log('DEBUG', message, context);
-  }
+  /** Yakalanmamış hataları ve sözleri otomatik toplar. Tarayıcıda bir kez çağrılır. */
+  globalYakalayicilariKur(): void {
+    if (typeof window === 'undefined') return
+    const w = window as unknown as { __bulutLoggerKurulu?: boolean }
+    if (w.__bulutLoggerKurulu) return
+    w.__bulutLoggerKurulu = true
 
-  public info(message: string, context?: Record<string, any>): void {
-    this.log('INFO', message, context);
-  }
+    window.addEventListener('error', (olay) => {
+      this.cokme(olay.error instanceof Error ? olay.error : olay.message, {
+        kaynak: olay.filename,
+        satir: olay.lineno,
+        sutun: olay.colno
+      })
+    })
 
-  public warn(message: string, context?: Record<string, any>): void {
-    this.log('WARNING', message, context);
-  }
-
-  public error(message: string, error?: Error | unknown, context?: Record<string, any>): void {
-    this.log('ERROR', message, context, error);
-  }
-
-  public critical(message: string, error?: Error | unknown, context?: Record<string, any>): void {
-    this.log('CRITICAL', message, context, error);
+    window.addEventListener('unhandledrejection', (olay) => {
+      const sebep = (olay as PromiseRejectionEvent).reason
+      this.cokme(sebep instanceof Error ? sebep : String(sebep), { tur: 'unhandledrejection' })
+    })
   }
 }
 
-export function createLogger(projectName: string, options?: Partial<LoggerOptions>): CloudLoggerTS {
-  return new CloudLoggerTS({ projectName, ...options });
+export function loggerOlustur(ayarlar: LoggerAyarlari): BulutLogger {
+  return new BulutLogger(ayarlar)
 }
