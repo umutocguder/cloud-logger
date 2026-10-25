@@ -1,101 +1,115 @@
-# Cloud Logger & Observability Engine
+<!-- Created by 11Hopem -->
+# 📡 Cloud Logger & Observability Engine
 
-A dual-write, zero-crash structured logging library for personal projects with **100% Local Data Custody** (rotating JSON Lines + SQLite) and asynchronous **Google Cloud Observability** (Google Cloud Logging & Error Reporting).
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue.svg?logo=typescript)](https://www.typescriptlang.org/)
+[![Zero Crash](https://img.shields.io/badge/resilience-zero--crash%20guarantee-brightgreen.svg)](#zero-crash-guarantee)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://11hopem.com)
+[![Created by 11Hopem](https://img.shields.io/badge/created%20by-11Hopem-orange.svg)](https://11hopem.com)
+
+A production-grade, dual-write structured logging and observability library designed for Python and TypeScript/Node.js applications. Combines **100% Local Data Custody** (rotating JSON Lines files + SQLite index) with non-blocking, asynchronous **Cloud Telemetry** and error reporting.
 
 ---
 
 ## 🌟 Key Features
 
-- **Extensive Structured Logging**: Automatic capture of timestamps, severity levels, module names, functions, line numbers, execution durations (`@logger.timed()`), context dictionaries, and full tracebacks.
-- **100% Local Data Custody**: Logs are immediately written to local disk (`logs/app.jsonl`, `logs/error.jsonl`) and local SQLite (`logs/telemetry.db`). You maintain full, permanent possession of all telemetry data locally.
-- **Google Cloud Observability**: Non-blocking background worker that streams logs to Google Cloud Logging API. Critical errors (`ERROR`, `CRITICAL`) trigger Google Cloud Error Reporting for immediate mobile/web console alerts.
-- **Zero-Crash Resilience**: If Google credentials are missing or the system is offline, logging operates purely in local custody mode without throwing exceptions or blocking the host application.
-- **Dual-Stack Support**: Includes Python library (`cloud_logger`) and TypeScript client (`typescript/logger.ts`).
-- **Local Inspector CLI**: Query, tail, and search logs across all personal projects using `main.py` / `log-cli`.
+- **Dual-Write Architecture**: Telemetry is written synchronously to local disk (JSONL + SQLite) for permanent local custody, while an asynchronous non-blocking worker pool streams events to cloud endpoints.
+- **Zero-Crash Resilience**: Network failures, missing API keys, or remote service outages will **never** raise exceptions or interrupt your application's primary execution loop.
+- **Rich Context Capture**: Automatically injects ISO timestamps, severity tiers (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`), calling module/function/line numbers, execution durations (`@logger.timed()`), and structured context payloads.
+- **Automatic Tracebacks & PII Masking**: Deep stack trace extraction on exceptions, with built-in regex scrubbing for credit cards, tokens, passwords, and Turkish identity numbers (TCKN).
+- **Dual-Stack Support**: Native implementations for both **Python** (`cloud_logger`) and **TypeScript/Node.js** (`typescript/logger.ts`).
+- **Built-in CLI Inspector**: Filter, tail, search, and aggregate structured logs directly from your terminal.
 
 ---
 
-## 🚀 Quick Start (Python)
+## 🏗️ Architecture
 
-### 1. Basic Usage
-
-```python
-from src.cloud_logger import get_logger
-
-# Initialize logger for your project
-logger = get_logger("google-photos-backup")
-
-# Standard log messages with custom structured context
-logger.info("Sync started", context={"batch_size": 50, "workers": 5})
-
-# Automatic execution timing decorator
-@logger.timed("process_media")
-def process_media(item_id: str):
-    # your logic here
-    pass
-
-# Error reporting (automatically captured in logs/error.jsonl & Google Cloud Error Reporting)
-try:
-    1 / 0
-except Exception as err:
-    logger.error("Calculation failed", error=err, context={"user_id": 42})
+```
+                   Application Code
+                          │
+                   logger.info() / error()
+                          │
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+  [ Local Custody ]               [ Cloud Telemetry ]
+  • logs/app.jsonl (Rotating)     • Non-blocking Worker Queue
+  • logs/telemetry.db (SQLite)    • HTTP REST Batch Dispatch
+  • Zero external network deps    • Safe offline drop / retry
 ```
 
 ---
 
-## 💻 Quick Start (TypeScript / Node.js)
+## 🚀 Quickstart (Python)
+
+### Installation
+
+```bash
+git clone https://github.com/umutocguder/cloud-logger.git
+cd cloud-logger
+pip install -e .
+```
+
+### Usage
+
+```python
+from src.cloud_logger import get_logger
+
+# Initialize logger for your service
+logger = get_logger("my-service")
+
+# Log structured events
+logger.info("Processing pipeline initiated", context={"batch_size": 100, "region": "eu-west"})
+
+# Decorator for measuring function execution latency
+@logger.timed("compute_metrics")
+def compute_metrics(dataset_id: str):
+    # Calculation logic...
+    pass
+
+# Exception logging with automatic traceback capture
+try:
+    result = 10 / 0
+except Exception as e:
+    logger.error("Calculation failed", error=e, context={"input": 0})
+```
+
+---
+
+## 🚀 Quickstart (TypeScript)
 
 ```typescript
-import { createLogger } from './typescript/logger';
+import { getLogger } from "./typescript/logger";
 
-const logger = createLogger('boutique-platform');
+const logger = getLogger("web-api");
 
-logger.info('Order received', { orderId: 'ord_123', amount: 450 });
+logger.info("Server started", { port: 3000, environment: "production" });
 
 try {
-  throw new Error('Database connection timed out');
+  throw new Error("Database timeout");
 } catch (err) {
-  logger.error('Failed to query inventory', err, { retryCount: 3 });
+  logger.error("Query failed", err as Error, { queryId: "q_123" });
 }
 ```
 
 ---
 
-## ☁️ Google Cloud Setup (Optional)
+## 🧪 Testing
 
-To stream logs directly to your Google Cloud Console:
-
-1. Create a Google Cloud Project (or use an existing one).
-2. Enable the **Cloud Logging API** & **Error Reporting API**:
-   ```bash
-   gcloud services enable logging.googleapis.com clouderrorreporting.googleapis.com
-   ```
-3. Create a Service Account with the role **Logs Writer** & **Error Reporting Writer**.
-4. Download the JSON key and set the environment variable:
-   ```bash
-   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service_account.json"
-   export GCP_PROJECT_ID="your-project-id"
-   ```
-*If credentials are not supplied, logs continue writing safely to local disk and SQLite.*
-
----
-
-## 🔍 Local Log Inspector CLI
+Run unit tests and verification suites:
 
 ```bash
-# View aggregate log storage and project counts across all ~/mycodespaces
-python3 main.py stats
+# Python tests
+python3 -m unittest discover -s tests
 
-# View recent errors and tracebacks across all projects
-python3 main.py errors --limit 10
-
-# Live follow a log file
-python3 main.py tail --file logs/app.jsonl
+# TypeScript tests
+npm test
 ```
 
 ---
 
-## 🔒 Confidentiality Notice
+## 🛡️ License & Attribution
 
-- **Personal Projects Only**: This library is strictly configured for personal repositories under `~/mycodespaces/*`.
-- **Company Data Isolation**: Company projects (`/Users/umut/intetra/`) are strictly excluded and must never stream telemetry to external endpoints.
+Created by [11Hopem](https://11hopem.com).  
+Copyright © 2026 11Hopem. All rights reserved.  
+Licensed under the [MIT License](LICENSE).  
+Official website: [https://11hopem.com](https://11hopem.com)
